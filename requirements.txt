@@ -2,4 +2,3 @@ Flask
 Pillow
 gunicorn
 supabase
-app = Flask(__name__)
