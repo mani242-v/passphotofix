@@ -1,7 +1,9 @@
 import os
 import io
+import cv2
+import numpy as np
 from flask import Flask, render_template_string, request, send_file
-from PIL import Image, ImageOps
+from PIL import Image
 from supabase import create_client
 
 app = Flask(__name__)
@@ -27,27 +29,75 @@ if SUPABASE_URL and SUPABASE_KEY:
     except:
         pass
 
-def smart_resize(image, target_w, target_h):
+def smart_resize_with_face_detection(pil_image, target_w, target_h):
     """
-    Prevents stretching! 
-    Crops the image to the correct aspect ratio (Center Focus) 
-    BEFORE resizing.
+    PRO LOGIC:
+    1. Tries to find a face using OpenCV.
+    2. If found -> Crops around the face center.
+    3. If NOT found -> Uses Top-Priority cropping.
     """
+    # Convert PIL Image to OpenCV format (numpy array)
+    img_np = np.array(pil_image)
+    
+    # Convert to Grayscale (needed for detection)
+    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    
+    # Load Face Detector (Haar Cascade - built into OpenCV)
+    cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+    face_cascade = cv2.CascadeClassifier(cascade_path)
+    
+    # Detect faces
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+    
+    # Calculate Target Aspect Ratio
     target_ratio = target_w / target_h
-    img_ratio = image.width / image.height
+    img_w, img_h = pil_image.size
+    img_ratio = img_w / img_h
+    
+    # Variables to determine crop box
+    crop_x, crop_y = 0, 0
+    crop_w, crop_h = img_w, img_h
 
-    if img_ratio > target_ratio:
-        # Image is too wide. Crop sides.
-        new_width = int(target_ratio * image.height)
-        offset = (image.width - new_width) // 2
-        image = image.crop((offset, 0, offset + new_width, image.height))
+    if len(faces) > 0:
+        # --- FACE DETECTED: Center on the face ---
+        (fx, fy, fw, fh) = faces[0] # Get first face
+        face_center_x = fx + (fw // 2)
+        face_center_y = fy + (fh // 2)
+        
+        if img_ratio > target_ratio:
+            # Too Wide: Crop sides relative to face center
+            new_width = int(target_ratio * img_h)
+            crop_x = face_center_x - (new_width // 2)
+            # Boundary checks
+            if crop_x < 0: crop_x = 0
+            if crop_x + new_width > img_w: crop_x = img_w - new_width
+            crop_w = new_width
+            crop_h = img_h
+        else:
+            # Too Tall: Crop top/bottom relative to face center
+            new_height = int(img_w / target_ratio)
+            crop_y = face_center_y - (new_height // 2)
+            # Boundary checks
+            if crop_y < 0: crop_y = 0
+            if crop_y + new_height > img_h: crop_y = img_h - new_height
+            crop_w = img_w
+            crop_h = new_height
+            
+        pil_image = pil_image.crop((crop_x, crop_y, crop_x + crop_w, crop_y + crop_h))
+        
     else:
-        # Image is too tall. Crop top/bottom.
-        new_height = int(image.width / target_ratio)
-        offset = (image.height - new_height) // 2
-        image = image.crop((0, offset, image.width, offset + new_height))
+        # --- NO FACE FOUND: Fallback to Top-Priority Logic ---
+        if img_ratio > target_ratio:
+            new_width = int(target_ratio * img_h)
+            offset = (img_w - new_width) // 2
+            pil_image = pil_image.crop((offset, 0, offset + new_width, img_h))
+        else:
+            new_height = int(img_w / target_ratio)
+            # Crop strictly from top (0) with small margin
+            pil_image = pil_image.crop((0, 0, img_w, new_height))
 
-    return image.resize((target_w, target_h), Image.Resampling.LANCZOS)
+    # Final Resize to exact pixels
+    return pil_image.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
 def compress_image(image, min_kb, max_kb):
     img_io = io.BytesIO()
@@ -64,7 +114,7 @@ def compress_image(image, min_kb, max_kb):
     img_io.seek(0)
     return img_io
 
-# --- UPGRADED UI ---
+# --- HTML WITH FAVICON ---
 HTML_TEMPLATE = '''
 <!doctype html>
 <html lang="en">
@@ -72,6 +122,9 @@ HTML_TEMPLATE = '''
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PassPhotoFix - Smart Govt Photo Tool</title>
+    
+    <link rel="icon" href="https://fav.farm/🇮🇳" />
+
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         body { 
@@ -100,7 +153,6 @@ HTML_TEMPLATE = '''
             border: 2px solid #e0e0e0; border-radius: 10px; box-sizing: border-box; font-family: inherit;
         }
         
-        /* MAIN BUTTON */
         #submitBtn { 
             width: 100%; padding: 15px; margin-top: 25px; 
             background: #764ba2; color: white; border: none; border-radius: 10px; 
@@ -110,7 +162,6 @@ HTML_TEMPLATE = '''
         }
         #submitBtn:hover { background: #5b3a80; transform: translateY(-2px); }
         
-        /* RESET BUTTON */
         #resetBtn {
             display: none; width: 100%; padding: 15px; margin-top: 15px;
             background: #28a745; color: white; border: none; border-radius: 10px;
@@ -118,7 +169,6 @@ HTML_TEMPLATE = '''
         }
         #resetBtn:hover { background: #218838; }
 
-        /* ANIMATIONS */
         .loader {
             display: none; border: 3px solid #f3f3f3; border-top: 3px solid #764ba2;
             border-radius: 50%; width: 30px; height: 30px;
@@ -138,27 +188,22 @@ HTML_TEMPLATE = '''
             var fileInput = document.querySelector('input[type="file"]');
             if (fileInput.files.length === 0) return;
 
-            // UI Changes on Submit
             document.getElementById('submitBtn').style.display = 'none';
             document.querySelector('.loader').style.display = 'block';
 
-            // Simulate server processing time (User sees loader)
             setTimeout(function() {
                 document.querySelector('.loader').style.display = 'none';
                 
-                // Show Success Message
                 var successDiv = document.querySelector('.success-msg');
                 successDiv.style.display = 'block';
                 successDiv.innerHTML = "✅ <b>Download Completed!</b><br><span style='font-size:13px; color:#555'>Check your downloads folder.</span>";
                 
-                // Show Reset Button
                 document.getElementById('resetBtn').style.display = 'block';
                 
-            }, 2500); // Wait 2.5 seconds
+            }, 3000); // Increased wait time slightly as CV takes 1 second more
         }
 
         function resetPage() {
-            // Reload the page to clear everything
             window.location.reload();
         }
     </script>
@@ -166,7 +211,7 @@ HTML_TEMPLATE = '''
 <body>
     <div class="container">
         <div class="logo">PassPhoto<span>Fix</span> 🚀</div>
-        <p>AI-Smart Cropping for Govt Exams</p>
+        <p>AI-Face Detection for Govt Exams</p>
         
         <form method="post" enctype="multipart/form-data" onsubmit="handleProcess()">
             <label>1. Select Exam Type</label>
@@ -182,7 +227,6 @@ HTML_TEMPLATE = '''
             <button type="submit" id="submitBtn">✨ Fix My Photo</button>
             
             <div class="loader"></div>
-            
             <div class="success-msg"></div>
 
             <button type="button" id="resetBtn" onclick="resetPage()">🔄 Process Another Photo</button>
@@ -204,7 +248,10 @@ def index():
             spec = EXAM_SPECS[exam_type]
             try:
                 img = Image.open(file.stream).convert('RGB')
-                img = smart_resize(img, spec['w'], spec['h'])
+                
+                # --- NEW LOGIC: DETECT FACE & CROP ---
+                img = smart_resize_with_face_detection(img, spec['w'], spec['h'])
+                
                 processed_img_io = compress_image(img, spec['min_kb'], spec['max_kb'])
                 
                 if supabase:
