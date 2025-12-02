@@ -2,5 +2,3 @@ Flask
 Pillow
 gunicorn
 supabase
-numpy
-opencv-python-headless
