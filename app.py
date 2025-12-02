@@ -1,8 +1,8 @@
 import os
 import io
 from flask import Flask, render_template_string, request, send_file
-from PIL import Image
-from supabase import create_client, Client
+from PIL import Image, ImageOps
+from supabase import create_client
 
 app = Flask(__name__)
 
@@ -24,8 +24,30 @@ supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    except Exception as e:
-        print(f"Supabase Error: {e}")
+    except:
+        pass
+
+def smart_resize(image, target_w, target_h):
+    """
+    Prevents stretching! 
+    Crops the image to the correct aspect ratio (Center Focus) 
+    BEFORE resizing.
+    """
+    target_ratio = target_w / target_h
+    img_ratio = image.width / image.height
+
+    if img_ratio > target_ratio:
+        # Image is too wide. Crop sides.
+        new_width = int(target_ratio * image.height)
+        offset = (image.width - new_width) // 2
+        image = image.crop((offset, 0, offset + new_width, image.height))
+    else:
+        # Image is too tall. Crop top/bottom.
+        new_height = int(image.width / target_ratio)
+        offset = (image.height - new_height) // 2
+        image = image.crop((0, offset, image.width, offset + new_height))
+
+    return image.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
 def compress_image(image, min_kb, max_kb):
     img_io = io.BytesIO()
@@ -42,86 +64,131 @@ def compress_image(image, min_kb, max_kb):
     img_io.seek(0)
     return img_io
 
-# --- UPGRADED HTML WITH LOADER ---
+# --- UPGRADED UI ---
 HTML_TEMPLATE = '''
 <!doctype html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PassPhotoFix - Free Govt Exam Photo Resizer</title>
+    <title>PassPhotoFix - Smart Govt Photo Tool</title>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; background: #f0f2f5; }
-        .container { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); text-align: center; }
-        h1 { color: #2c3e50; margin-bottom: 10px; }
-        p { color: #666; margin-bottom: 30px; }
-        
-        select, input[type=file] { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; }
-        
-        button { 
-            width: 100%; padding: 14px; margin-top: 20px; 
-            background: #007bff; color: white; border: none; border-radius: 6px; 
-            cursor: pointer; font-size: 16px; font-weight: bold; transition: background 0.3s;
+        body { 
+            font-family: 'Poppins', sans-serif; 
+            margin: 0; padding: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex; align-items: center; justify-content: center;
         }
-        button:hover { background: #0056b3; }
+        .container { 
+            background: rgba(255, 255, 255, 0.95); 
+            padding: 40px; border-radius: 20px; 
+            box-shadow: 0 10px 25px rgba(0,0,0,0.2); 
+            text-align: center; max-width: 400px; width: 90%;
+        }
+        .logo {
+            font-size: 24px; font-weight: 800; color: #764ba2;
+            margin-bottom: 5px; display: flex; align-items: center; justify-content: center; gap: 10px;
+        }
+        .logo span { background: #764ba2; color: white; padding: 2px 8px; border-radius: 5px; }
+        p { color: #666; font-size: 14px; margin-bottom: 25px; }
         
-        /* --- LOADER CSS --- */
-        .loader-container { display: none; margin-top: 20px; }
+        label { display: block; text-align: left; font-weight: 600; margin-top: 15px; color: #444; }
+        select, input[type=file] { 
+            width: 100%; padding: 12px; margin-top: 5px; 
+            border: 2px solid #e0e0e0; border-radius: 10px; box-sizing: border-box; font-family: inherit;
+        }
+        
+        /* MAIN BUTTON */
+        #submitBtn { 
+            width: 100%; padding: 15px; margin-top: 25px; 
+            background: #764ba2; color: white; border: none; border-radius: 10px; 
+            cursor: pointer; font-size: 16px; font-weight: 600; 
+            transition: transform 0.2s, background 0.2s;
+            box-shadow: 0 4px 10px rgba(118, 75, 162, 0.3);
+        }
+        #submitBtn:hover { background: #5b3a80; transform: translateY(-2px); }
+        
+        /* RESET BUTTON */
+        #resetBtn {
+            display: none; width: 100%; padding: 15px; margin-top: 15px;
+            background: #28a745; color: white; border: none; border-radius: 10px;
+            cursor: pointer; font-size: 16px; font-weight: 600;
+        }
+        #resetBtn:hover { background: #218838; }
+
+        /* ANIMATIONS */
         .loader {
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #007bff;
-            border-radius: 50%;
-            width: 30px; height: 30px;
-            animation: spin 1s linear infinite;
-            margin: 0 auto;
+            display: none; border: 3px solid #f3f3f3; border-top: 3px solid #764ba2;
+            border-radius: 50%; width: 30px; height: 30px;
+            animation: spin 1s linear infinite; margin: 20px auto;
+        }
+        .success-msg {
+            display: none; color: #333; font-weight: bold; margin-top: 20px;
+            padding: 15px; background: #e8f5e9; border-radius: 8px; border: 1px solid #c3e6cb;
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         
-        .footer { margin-top: 30px; font-size: 12px; color: #888; }
+        .footer { margin-top: 20px; font-size: 11px; color: #888; }
     </style>
     
     <script>
-        function showLoader() {
+        function handleProcess() {
             var fileInput = document.querySelector('input[type="file"]');
-            if (fileInput.files.length === 0) {
-                return; // Don't show loader if no file selected
-            }
-            // Show Loader and change button text
-            document.getElementById('loader-box').style.display = 'block';
-            var btn = document.querySelector('button');
-            btn.innerText = 'Processing... Please Wait';
-            btn.style.opacity = '0.7';
-            btn.style.cursor = 'not-allowed';
+            if (fileInput.files.length === 0) return;
+
+            // UI Changes on Submit
+            document.getElementById('submitBtn').style.display = 'none';
+            document.querySelector('.loader').style.display = 'block';
+
+            // Simulate server processing time (User sees loader)
+            setTimeout(function() {
+                document.querySelector('.loader').style.display = 'none';
+                
+                // Show Success Message
+                var successDiv = document.querySelector('.success-msg');
+                successDiv.style.display = 'block';
+                successDiv.innerHTML = "✅ <b>Download Completed!</b><br><span style='font-size:13px; color:#555'>Check your downloads folder.</span>";
+                
+                // Show Reset Button
+                document.getElementById('resetBtn').style.display = 'block';
+                
+            }, 2500); // Wait 2.5 seconds
+        }
+
+        function resetPage() {
+            // Reload the page to clear everything
+            window.location.reload();
         }
     </script>
 </head>
 <body>
     <div class="container">
-        <h1>PassPhotoFix 🇮🇳</h1>
-        <p>Resize & Compress photos for SSC, UPSC, IBPS in 1 click.</p>
+        <div class="logo">PassPhoto<span>Fix</span> 🚀</div>
+        <p>AI-Smart Cropping for Govt Exams</p>
         
-        <form method="post" enctype="multipart/form-data" onsubmit="showLoader()">
-            <div style="text-align: left; font-weight: bold; margin-bottom: 5px;">1. Select Exam Type:</div>
+        <form method="post" enctype="multipart/form-data" onsubmit="handleProcess()">
+            <label>1. Select Exam Type</label>
             <select name="exam_type">
                 {% for key, val in specs.items() %}
-                <option value="{{ key }}">{{ val.name }} ({{val.min_kb}}-{{val.max_kb}} KB)</option>
+                <option value="{{ key }}">{{ val.name }}</option>
                 {% endfor %}
             </select>
             
-            <div style="text-align: left; font-weight: bold; margin-bottom: 5px; margin-top: 15px;">2. Upload Photo:</div>
+            <label>2. Upload Your Photo</label>
             <input type="file" name="file" required accept="image/*">
             
-            <button type="submit">Convert & Download</button>
+            <button type="submit" id="submitBtn">✨ Fix My Photo</button>
             
-            <div id="loader-box" class="loader-container">
-                <div class="loader"></div>
-                <div style="margin-top: 10px; color: #555;">Resizing & Compressing...</div>
-            </div>
+            <div class="loader"></div>
+            
+            <div class="success-msg"></div>
+
+            <button type="button" id="resetBtn" onclick="resetPage()">🔄 Process Another Photo</button>
         </form>
-    </div>
-    <div class="footer">
-        🔒 Privacy Safe: Photos are processed in RAM and never stored.<br>
-        Built with Python & Flask.
+        
+        <div class="footer">Secure & Private. Files processed in RAM only.</div>
     </div>
 </body>
 </html>
@@ -137,10 +204,9 @@ def index():
             spec = EXAM_SPECS[exam_type]
             try:
                 img = Image.open(file.stream).convert('RGB')
-                img = img.resize((spec['w'], spec['h']), Image.Resampling.LANCZOS)
+                img = smart_resize(img, spec['w'], spec['h'])
                 processed_img_io = compress_image(img, spec['min_kb'], spec['max_kb'])
                 
-                # Log to DB (Silent fail if DB error)
                 if supabase:
                     try:
                         supabase.table("usage_logs").insert({"exam": exam_type}).execute()
@@ -149,7 +215,7 @@ def index():
 
                 return send_file(processed_img_io, mimetype='image/jpeg', as_attachment=True, download_name=f"{exam_type}_fixed.jpg")
             except Exception as e:
-                return f"Error processing image: {str(e)}"
+                return f"Error: {str(e)}"
 
     return render_template_string(HTML_TEMPLATE, specs=EXAM_SPECS)
 
